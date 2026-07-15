@@ -8,6 +8,8 @@ from dream.reports import DreamReportStore
 from dream.review.models import ArtifactKind, ReviewAction
 from dream.rollback import RollbackService
 from dream.scope import ScopeIds, resolve_scope
+from dream.service import DreamService
+from tests.source_helpers import local_event
 
 
 def test_user_profile_action_is_scoped_and_cites_source(tmp_path: Path) -> None:
@@ -85,3 +87,24 @@ def test_report_store_writes_a_disk_verifiable_json_report(tmp_path: Path) -> No
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["run_id"] == "run-1"
     assert report["source_event_ids"] == ["evt-1", "evt-2"]
+
+
+def test_service_recovers_unprocessed_ledger_event_after_restart(
+    tmp_path: Path,
+) -> None:
+    first = DreamService(tmp_path)
+    first.ingest_conversation(local_event("evt-1"))
+
+    restarted = DreamService(tmp_path)
+    assert restarted.scheduler.pending_event_ids() == ("evt-1",)
+    assert restarted.run_pending()[0]["status"] == "success"
+
+    finished = DreamService(tmp_path)
+    assert finished.scheduler.pending_event_ids() == ()
+
+
+def test_run_pending_marks_event_processed_after_report(tmp_path: Path) -> None:
+    service = DreamService(tmp_path)
+    service.ingest_conversation(local_event("evt-1"))
+    service.run_pending()
+    assert service.processed_events.contains("evt-1") is True

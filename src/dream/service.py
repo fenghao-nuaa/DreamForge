@@ -13,6 +13,7 @@ from dream.events import TaskCompletedEvent
 from dream.ledger import EventLedger
 from dream.managers.decision_cards import DecisionCardManager
 from dream.managers.memory import MemoryManager
+from dream.processed_events import ProcessedEventLedger
 from dream.reports import DreamReportStore
 from dream.review.backend import DeterministicReviewBackend, ReviewBackend
 from dream.review.models import ArtifactKind
@@ -35,11 +36,28 @@ class DreamService:
     ) -> None:
         self.home = home
         self.ledger = EventLedger(home / "ledger" / "events.jsonl")
+        self.processed_events = ProcessedEventLedger(
+            home / "ledger" / "processed-events.jsonl"
+        )
         self.scheduler = DreamScheduler(review_threshold=review_threshold)
         self.reviewer = BackgroundReviewOrchestrator(
             backend or DeterministicReviewBackend()
         )
         self.semantic_curator_backend = semantic_curator_backend
+        self.recover_pending_events()
+
+    def recover_pending_events(self) -> int:
+        pending = set(self.scheduler.pending_event_ids())
+        recovered = 0
+        for event in self.ledger.read_all():
+            if event.event_id in pending:
+                continue
+            if self.processed_events.contains(event.event_id):
+                continue
+            self.scheduler.enqueue(event)
+            pending.add(event.event_id)
+            recovered += 1
+        return recovered
 
     def ingest_conversation(self, event: TaskCompletedEvent) -> None:
         resolve_scope(self.home, event.scope)
@@ -108,6 +126,7 @@ class DreamService:
                     "review_summary": result.summary,
                 }
             )
+            self.processed_events.append(event.event_id)
             runs.append(
                 {
                     "run_id": run_id,
