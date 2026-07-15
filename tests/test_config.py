@@ -19,6 +19,35 @@ def test_missing_env_file_uses_safe_deterministic_backend(tmp_path: Path) -> Non
     assert isinstance(build_review_backend(settings), DeterministicReviewBackend)
 
 
+def test_internship_source_defaults_to_disabled(tmp_path: Path) -> None:
+    settings = load_settings(tmp_path / ".env")
+    assert settings.internship_source.enabled is False
+
+
+def test_internship_source_loads_pull_settings(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "DREAM_INTERNSHIP_SOURCE_ENABLED=true\n"
+        "DREAM_INTERNSHIP_SOURCE_URL=http://127.0.0.1:8000/v1/memory/dream-export\n"
+        "DREAM_INTERNSHIP_SOURCE_API_KEY=source-secret\n"
+        "DREAM_INTERNSHIP_SOURCE_TENANT_ID=acme\n"
+        "DREAM_INTERNSHIP_SOURCE_AGENT_ID=assistant\n"
+        "DREAM_INTERNSHIP_SOURCE_BATCH_SIZE=25\n"
+        "DREAM_INTERNSHIP_SOURCE_TIMEOUT_SECONDS=7.5\n"
+        "DREAM_INTERNSHIP_SOURCE_INTERVAL_SECONDS=120\n",
+        encoding="utf-8",
+    )
+    source = load_settings(env_file).internship_source
+    assert source.enabled is True
+    assert source.url.endswith("/v1/memory/dream-export")
+    assert source.api_key == "source-secret"
+    assert source.tenant_id == "acme"
+    assert source.agent_id == "assistant"
+    assert source.batch_size == 25
+    assert source.timeout_seconds == 7.5
+    assert source.interval_seconds == 120
+
+
 def test_openai_compatible_backend_uses_env_file_values(tmp_path: Path) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text(

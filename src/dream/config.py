@@ -1,6 +1,6 @@
 """DREAM runtime configuration loaded from environment variables."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 from pathlib import Path
 from typing import Callable
@@ -8,6 +8,18 @@ from typing import Callable
 from dream.curators.llm_backend import OpenAICuratorBackend, SemanticCuratorBackend
 from dream.review.backend import DeterministicReviewBackend, ReviewBackend
 from dream.review.llm_backend import OpenAIReviewBackend
+
+
+@dataclass(frozen=True)
+class InternshipSourceSettings:
+    enabled: bool = False
+    url: str = ""
+    api_key: str = ""
+    tenant_id: str = ""
+    agent_id: str = ""
+    batch_size: int = 100
+    timeout_seconds: float = 15.0
+    interval_seconds: int = 300
 
 
 @dataclass(frozen=True)
@@ -23,6 +35,9 @@ class DreamSettings:
     curator_base_url: str | None = None
     curator_api_key: str = ""
     curator_max_completion_tokens: int = 3000
+    internship_source: InternshipSourceSettings = field(
+        default_factory=InternshipSourceSettings
+    )
 
 
 def _read_env_file(path: Path) -> dict[str, str]:
@@ -61,6 +76,25 @@ def _positive_int(value: str, name: str) -> int:
     return parsed
 
 
+def _positive_float(value: str, name: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number") from exc
+    if parsed <= 0:
+        raise ValueError(f"{name} must be positive")
+    return parsed
+
+
+def _boolean(value: str, name: str) -> bool:
+    normalized = value.casefold()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be true or false")
+
+
 def load_settings(path: Path | None = None) -> DreamSettings:
     """Load settings from a dotenv file, with process environment taking priority."""
 
@@ -77,6 +111,33 @@ def load_settings(path: Path | None = None) -> DreamSettings:
     if curator_backend not in {"inherit", "deterministic", "openai"}:
         raise ValueError(
             "DREAM_CURATOR_BACKEND must be inherit, deterministic, or openai"
+        )
+
+    source = InternshipSourceSettings(
+        enabled=_boolean(
+            value("DREAM_INTERNSHIP_SOURCE_ENABLED", "false"),
+            "DREAM_INTERNSHIP_SOURCE_ENABLED",
+        ),
+        url=value("DREAM_INTERNSHIP_SOURCE_URL"),
+        api_key=value("DREAM_INTERNSHIP_SOURCE_API_KEY"),
+        tenant_id=value("DREAM_INTERNSHIP_SOURCE_TENANT_ID"),
+        agent_id=value("DREAM_INTERNSHIP_SOURCE_AGENT_ID"),
+        batch_size=_positive_int(
+            value("DREAM_INTERNSHIP_SOURCE_BATCH_SIZE", "100"),
+            "DREAM_INTERNSHIP_SOURCE_BATCH_SIZE",
+        ),
+        timeout_seconds=_positive_float(
+            value("DREAM_INTERNSHIP_SOURCE_TIMEOUT_SECONDS", "15"),
+            "DREAM_INTERNSHIP_SOURCE_TIMEOUT_SECONDS",
+        ),
+        interval_seconds=_positive_int(
+            value("DREAM_INTERNSHIP_SOURCE_INTERVAL_SECONDS", "300"),
+            "DREAM_INTERNSHIP_SOURCE_INTERVAL_SECONDS",
+        ),
+    )
+    if source.enabled and not all((source.url, source.tenant_id, source.agent_id)):
+        raise ValueError(
+            "enabled Internship source requires URL, tenant ID, and agent ID"
         )
 
     return DreamSettings(
@@ -97,6 +158,7 @@ def load_settings(path: Path | None = None) -> DreamSettings:
             value("DREAM_CURATOR_MAX_COMPLETION_TOKENS", "3000"),
             "DREAM_CURATOR_MAX_COMPLETION_TOKENS",
         ),
+        internship_source=source,
     )
 
 
