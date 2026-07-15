@@ -1,0 +1,82 @@
+"""Hermes-style bounded USER.md and MEMORY.md mutations."""
+
+import hashlib
+from pathlib import Path
+
+from dream.artifacts import ArtifactVersion, AtomicArtifactStore
+from dream.review.models import ArtifactKind, ReviewAction
+from dream.rollback import RollbackService
+from dream.scope import ScopePaths
+
+
+_ENTRY_DELIMITER = "\n§\n"
+
+
+class MemoryManager:
+    def __init__(self, paths: ScopePaths, user_char_limit: int = 1375) -> None:
+        self.paths = paths
+        self.artifacts = AtomicArtifactStore(paths.agent_root)
+        self.rollback = RollbackService(paths)
+        self.user_char_limit = user_char_limit
+        self.last_snapshot_id = ""
+
+    def _relative_path(self, action: ReviewAction) -> Path:
+        if action.kind is ArtifactKind.USER_PROFILE:
+            return Path("users") / self.paths.user_root.name / "USER.md"
+        if action.kind is ArtifactKind.AGENT_MEMORY:
+            return Path("MEMORY.md")
+        raise ValueError(f"unsupported memory artifact: {action.kind.value}")
+
+    def apply(self, action: ReviewAction) -> ArtifactVersion:
+        if action.tool_name != "memory_manage":
+            raise ValueError("memory action must use memory_manage")
+        relative = self._relative_path(action)
+        existing = self.artifacts.read_text(relative)
+        self.last_snapshot_id = self.rollback.capture((relative,))
+        operation = str(action.payload.get("action", "add"))
+        content = str(action.payload.get("content", "")).strip()
+        if not content or "\x00" in content:
+            raise ValueError("memory content must be non-empty text")
+        entries = [entry.strip() for entry in existing.split(_ENTRY_DELIMITER) if entry.strip()]
+        sourced_entry = f"{content}\n<!-- dream-source: {action.source_event_id} -->"
+        if operation == "add":
+            if not any(entry.split("\n<!-- dream-source:", 1)[0] == content for entry in entries):
+                entries.append(sourced_entry)
+        elif operation == "replace":
+            old_content = str(action.payload.get("old_content", "")).strip()
+            index = next(
+                (
+                    i
+                    for i, entry in enumerate(entries)
+                    if entry.split("\n<!-- dream-source:", 1)[0] == old_content
+                ),
+                None,
+            )
+            if index is None:
+                raise ValueError("old_content was not found")
+            entries[index] = sourced_entry
+        elif operation == "remove":
+            old_content = str(action.payload.get("old_content", content)).strip()
+            entries = [
+                entry
+                for entry in entries
+                if entry.split("\n<!-- dream-source:", 1)[0] != old_content
+            ]
+        else:
+            raise ValueError(f"unsupported memory action: {operation}")
+        rendered = _ENTRY_DELIMITER.join(entries)
+        if rendered:
+            rendered += "\n"
+        if action.kind is ArtifactKind.USER_PROFILE and len(rendered) > self.user_char_limit:
+            raise ValueError(
+                f"user profile exceeds {self.user_char_limit} character limit"
+            )
+        if rendered == existing:
+            encoded = existing.encode("utf-8")
+            return ArtifactVersion(
+                sha256=hashlib.sha256(encoded).hexdigest(),
+                byte_length=len(encoded),
+                updated_at="unchanged",
+            )
+        return self.artifacts.write_text(relative, rendered)
+

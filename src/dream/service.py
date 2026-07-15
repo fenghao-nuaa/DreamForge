@@ -1,0 +1,162 @@
+"""Application service connecting short-term conversation input to dreams."""
+
+from datetime import datetime
+from pathlib import Path
+from uuid import uuid4
+
+from dream.artifacts import AtomicArtifactStore
+from dream.curators.ai import AICurator
+from dream.curators.llm_backend import SemanticCuratorBackend
+from dream.curators.registry import CuratorRegistry
+from dream.curators.user import UserCurator
+from dream.events import TaskCompletedEvent
+from dream.ledger import EventLedger
+from dream.managers.decision_cards import DecisionCardManager
+from dream.managers.memory import MemoryManager
+from dream.reports import DreamReportStore
+from dream.review.backend import DeterministicReviewBackend, ReviewBackend
+from dream.review.models import ArtifactKind
+from dream.review.orchestrator import BackgroundReviewOrchestrator
+from dream.rollback import RollbackService
+from dream.scheduler import DreamScheduler
+from dream.scope import ScopeIds, resolve_scope
+from dream.snapshots import SnapshotStore
+
+
+class DreamService:
+    """Owns no Redis state; receives completed conversation batches by API."""
+
+    def __init__(
+        self,
+        home: Path,
+        backend: ReviewBackend | None = None,
+        semantic_curator_backend: SemanticCuratorBackend | None = None,
+        review_threshold: int = 10,
+    ) -> None:
+        self.home = home
+        self.ledger = EventLedger(home / "ledger" / "events.jsonl")
+        self.scheduler = DreamScheduler(review_threshold=review_threshold)
+        self.reviewer = BackgroundReviewOrchestrator(
+            backend or DeterministicReviewBackend()
+        )
+        self.semantic_curator_backend = semantic_curator_backend
+
+    def ingest_conversation(self, event: TaskCompletedEvent) -> None:
+        resolve_scope(self.home, event.scope)
+        self.ledger.append(event)
+        self.scheduler.enqueue(event)
+
+    def start_context(self, ids: ScopeIds) -> dict[str, object]:
+        paths = resolve_scope(self.home, ids)
+        artifacts = AtomicArtifactStore(paths.agent_root)
+        snapshot = SnapshotStore(paths, artifacts).create(ids)
+        user_key = f"users/{ids.user_id}/USER.md"
+        cards = [
+            snapshot_file.content
+            for key, snapshot_file in sorted(snapshot.files.items())
+            if key.startswith("decision-cards/") and key.endswith(".md")
+        ]
+        return {
+            "snapshot_id": snapshot.snapshot_id,
+            "user_profile": snapshot.files[user_key].content,
+            "decision_rules": snapshot.files["DECISION_RULES.md"].content,
+            "decision_cards": cards,
+        }
+
+    def run_pending(self) -> list[dict[str, object]]:
+        runs: list[dict[str, object]] = []
+        while event := self.scheduler.pop_pending():
+            paths = resolve_scope(self.home, event.scope)
+            snapshot = SnapshotStore(
+                paths, AtomicArtifactStore(paths.agent_root)
+            ).create(event.scope)
+            result = self.reviewer.review(
+                event,
+                allowed_tools=frozenset(
+                    {"memory_manage", "decision_card_manage"}
+                ),
+                snapshot=snapshot,
+            )
+            applied_kinds: list[str] = []
+            rollback_ids: list[str] = []
+            errors: list[str] = []
+            for action in result.actions:
+                try:
+                    if action.kind is ArtifactKind.USER_PROFILE:
+                        manager = MemoryManager(paths)
+                    elif action.kind is ArtifactKind.DECISION_CARD:
+                        manager = DecisionCardManager(paths)
+                    else:
+                        continue
+                    manager.apply(action)
+                    rollback_ids.append(manager.last_snapshot_id)
+                    applied_kinds.append(action.kind.value)
+                except Exception as exc:
+                    errors.append(f"{action.kind.value}: {type(exc).__name__}: {exc}")
+            self.scheduler.mark_review_accepted(event.scope)
+            run_id = f"review-{uuid4().hex}"
+            status = "success" if not errors else "partial"
+            DreamReportStore(paths).write(
+                {
+                    "run_id": run_id,
+                    "curator": "background_review",
+                    "status": status,
+                    "source_event_ids": [event.event_id],
+                    "artifact_kinds": applied_kinds,
+                    "rollback_snapshot_ids": rollback_ids,
+                    "errors": errors,
+                    "review_summary": result.summary,
+                }
+            )
+            runs.append(
+                {
+                    "run_id": run_id,
+                    "status": status,
+                    "artifact_kinds": applied_kinds,
+                    "errors": errors,
+                }
+            )
+        return runs
+
+    def run_curators(self, ids: ScopeIds) -> dict[str, object]:
+        paths = resolve_scope(self.home, ids)
+        ai_report = AICurator(
+            paths, semantic_backend=self.semantic_curator_backend
+        ).run()
+        user_report = UserCurator(
+            paths, semantic_backend=self.semantic_curator_backend
+        ).run()
+        return {"ai": ai_report, "user": user_report}
+
+    def run_due_curators(self, now: datetime) -> dict[str, dict[str, object]]:
+        active_scopes = {event.scope for event in self.ledger.read_all()}
+        results: dict[str, dict[str, object]] = {}
+        for ids in sorted(
+            active_scopes,
+            key=lambda item: (item.tenant_id, item.agent_id, item.user_id),
+        ):
+            paths = resolve_scope(self.home, ids)
+            due = CuratorRegistry(
+                [
+                    AICurator(
+                        paths, semantic_backend=self.semantic_curator_backend
+                    ),
+                    UserCurator(
+                        paths, semantic_backend=self.semantic_curator_backend
+                    ),
+                ]
+            ).run_due(now)
+            if due:
+                scope_key = f"{ids.tenant_id}/{ids.agent_id}/{ids.user_id}"
+                results[scope_key] = due
+        return results
+
+    def rollback(self, ids: ScopeIds, snapshot_id: str) -> None:
+        paths = resolve_scope(self.home, ids)
+        RollbackService(paths).restore(snapshot_id)
+
+    def read_report(self, ids: ScopeIds, run_id: str) -> str:
+        paths = resolve_scope(self.home, ids)
+        return AtomicArtifactStore(paths.agent_root).read_text(
+            Path("dream-reports") / f"{run_id}.json"
+        )
