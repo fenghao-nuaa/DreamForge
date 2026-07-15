@@ -28,6 +28,9 @@ class EventLedger:
                 handle.flush()
                 os.fsync(handle.fileno())
 
+    def contains(self, event_id: str) -> bool:
+        return any(event.event_id == event_id for event in self.read_all())
+
     def read_all(self) -> list[TaskCompletedEvent]:
         with self._lock:
             if not self.path.exists():

@@ -33,3 +33,10 @@ def test_event_ledger_rejects_duplicate_event_ids(tmp_path: Path) -> None:
     ledger.append(_event())
     with pytest.raises(ValueError, match="duplicate event_id"):
         ledger.append(_event())
+
+
+def test_event_ledger_reports_existing_event_id(tmp_path: Path) -> None:
+    ledger = EventLedger(tmp_path / "events.jsonl")
+    ledger.append(_event("evt-1"))
+    assert ledger.contains("evt-1") is True
+    assert ledger.contains("evt-2") is False
