@@ -1,7 +1,7 @@
 """Durable cursor-based ingestion for the Internship conversation source."""
 
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -147,6 +147,23 @@ class InternshipSourceSync:
                 last_errors=result.errors,
             )
         )
+
+    def sync_if_due(self, now: datetime) -> SourceSyncResult:
+        state = self.state_store.load()
+        if state.last_sync_at:
+            last_sync_at = datetime.fromisoformat(state.last_sync_at)
+            next_sync_at = last_sync_at + timedelta(
+                seconds=self.settings.interval_seconds
+            )
+            if now < next_sync_at:
+                return SourceSyncResult(
+                    status="not_due",
+                    fetched=0,
+                    ingested=0,
+                    duplicates=0,
+                    cursor=state.cursor,
+                )
+        return self.sync_once()
 
     def sync_once(self) -> SourceSyncResult:
         state = self.state_store.load()

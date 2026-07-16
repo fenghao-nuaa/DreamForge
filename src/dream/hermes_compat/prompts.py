@@ -18,6 +18,9 @@ choice, the principle used, the observed outcome, and important boundaries.
 Create or update a decision card only when the reasoning could guide future
 choices and contribute to a stable, human-like decision identity. A task
 narrative or a generic instruction is not a decision card.
+Never copy a user's personal facts, identity, preferences, or secrets into an
+AI decision card. Cards may generalize interaction lessons, but they must remain
+user-agnostic because they are shared by the same assistant across users.
 
 Act on whichever dimension has real signal. The same conversation may update
 both. If nothing durable stands out, call no tool.

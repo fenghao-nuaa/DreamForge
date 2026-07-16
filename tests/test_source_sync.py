@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dream.service import DreamService
@@ -24,6 +25,11 @@ class FakeSourceClient:
 class FailingSourceClient:
     def fetch(self, after: str, limit: int) -> tuple[InternshipRecord, ...]:
         raise SourceFetchError("Internship source request failed")
+
+
+class UnexpectedSourceClient:
+    def fetch(self, after: str, limit: int) -> tuple[InternshipRecord, ...]:
+        raise AssertionError("source must not be called before the interval is due")
 
 
 def test_source_user_id_mapping_is_stable_and_path_safe() -> None:
@@ -97,3 +103,28 @@ def test_sync_failure_does_not_advance_cursor(tmp_path: Path) -> None:
     assert result.status == "error"
     assert result.cursor == ""
     assert result.errors == ("Internship source request failed",)
+
+
+def test_sync_if_due_skips_source_before_configured_interval(tmp_path: Path) -> None:
+    service = DreamService(tmp_path)
+    state_store = SourceSyncStateStore(
+        tmp_path / "source-state" / "internship.json"
+    )
+    state_store.save(
+        SourceSyncState(
+            cursor="101",
+            last_sync_at="2026-07-15T10:00:00+00:00",
+            last_status="success",
+        )
+    )
+    sync = InternshipSourceSync(
+        service,
+        source_settings(interval_seconds=300),
+        client=UnexpectedSourceClient(),
+        state_store=state_store,
+    )
+
+    result = sync.sync_if_due(datetime(2026, 7, 15, 10, 4, 59, tzinfo=timezone.utc))
+
+    assert result.status == "not_due"
+    assert result.cursor == "101"

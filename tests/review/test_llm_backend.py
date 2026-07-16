@@ -88,3 +88,22 @@ def test_llm_backend_does_not_offer_a_disallowed_management_tool() -> None:
     assert [
         tool["function"]["name"] for tool in completions.kwargs["tools"]
     ] == ["memory_manage"]
+
+
+def test_llm_review_keeps_user_facts_out_of_shared_ai_cards() -> None:
+    completions = FakeCompletions([])
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    backend = OpenAIReviewBackend(client=client, model="review-model")
+
+    backend.review(
+        ReviewRequest(
+            event_id="evt-private-user-fact",
+            transcript_text="User: my private preference is concise answers",
+            final_response="Understood.",
+            allowed_tools=frozenset({"memory_manage", "decision_card_manage"}),
+        )
+    )
+
+    system_prompt = completions.kwargs["messages"][0]["content"]
+    assert "Never copy a user's personal facts" in system_prompt
+    assert "user-agnostic" in system_prompt

@@ -22,17 +22,25 @@ Run the local-only API with:
 uvicorn dream.api:app --host 127.0.0.1 --port 8765
 ```
 
-The upstream short-term memory service pushes a completed conversation batch
-to `POST /v1/dream/conversations`. DREAM does not connect to its Redis. Run
-queued incremental dreams through `POST /v1/dream/run-pending`; production
-deployments also run the same queue automatically from the FastAPI lifespan
-worker. The worker discovers active isolated scopes from the event ledger and
-runs due AI/User Curators according to their stored interval state.
+Completed conversations can enter DREAM in two ways: an upstream service can
+push one batch to `POST /v1/dream/conversations`, or DREAM can periodically pull
+NDJSON from a configured export API. DREAM does not connect to the upstream
+Redis, Mirage, vector index, or embedding store. The background worker saves a
+durable cursor, fetches only newer records, converts them into DREAM events,
+and then runs the same Background Review used by pushed conversations.
 
-The current priority artifacts are AI decision cards and isolated `USER.md`
-profiles. `POST /v1/dream/run-curators` performs the periodic maintenance dream
-for both artifact types. Context returned from `POST /v1/tasks/start` is a
-frozen snapshot, so a dream write becomes visible only to the next task.
+Enable the pull source with the `DREAM_INTERNSHIP_SOURCE_*` values shown in
+`.env.example`. The upstream endpoint receives `after` and `limit` query
+parameters and returns `application/x-ndjson`. Each line contains `cursor`,
+`event_id`, `user_id`, `session_id`, `round_id`, `completed_at`, complete
+`messages`, and `final_response`.
+
+The current priority artifacts are agent-level AI decision cards and isolated
+per-user `USER.md` profiles. A pulled conversation can update both in one
+Background Review. `POST /v1/dream/run-curators` performs the periodic
+maintenance dream for both artifact types. Context returned from
+`POST /v1/tasks/start` is a frozen snapshot, so a dream write becomes visible
+only to the next task.
 
 Bind to a public interface only behind enterprise authentication and TLS.
 

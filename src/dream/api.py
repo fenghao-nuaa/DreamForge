@@ -9,12 +9,15 @@ from pathlib import Path
 from typing import Callable
 
 from fastapi import FastAPI, HTTPException, Response, status
+import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from dream.config import build_curator_backend, build_review_backend, load_settings
 from dream.events import TaskCompletedEvent
 from dream.scope import ScopeIds
 from dream.service import DreamService
+from dream.source_sync import InternshipSourceSync
+from dream.sources.internship import InternshipSourceClient
 
 
 class ScopeRequest(BaseModel):
@@ -75,6 +78,7 @@ def create_app(
     *,
     env_file: Path | None = None,
     client_factory: Callable[..., object] | None = None,
+    source_transport: httpx.BaseTransport | None = None,
 ) -> FastAPI:
     resolved_env_file = env_file or Path(
         os.environ.get("DREAM_ENV_FILE", ".env")
@@ -89,6 +93,16 @@ def create_app(
         backend=backend,
         semantic_curator_backend=semantic_curator_backend,
     )
+    source_sync: InternshipSourceSync | None = None
+    if settings.internship_source.enabled:
+        source_sync = InternshipSourceSync(
+            service,
+            settings.internship_source,
+            client=InternshipSourceClient(
+                settings.internship_source,
+                transport=source_transport,
+            ),
+        )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -96,6 +110,18 @@ def create_app(
 
         async def dream_worker() -> None:
             while not stop.is_set():
+                if source_sync is not None:
+                    try:
+                        source_result = await asyncio.to_thread(
+                            source_sync.sync_if_due, datetime.now(timezone.utc)
+                        )
+                        if source_result.status == "error":
+                            logger.warning(
+                                "DREAM source sync failed: %s",
+                                "; ".join(source_result.errors),
+                            )
+                    except Exception:
+                        logger.exception("DREAM source sync iteration failed")
                 try:
                     await asyncio.to_thread(service.run_pending)
                     await asyncio.to_thread(
@@ -119,6 +145,7 @@ def create_app(
 
     application = FastAPI(title="DREAM", version="0.1.0", lifespan=lifespan)
     application.state.dream_service = service
+    application.state.internship_source_sync = source_sync
 
     @application.post("/v1/tasks/start")
     def start_task(scope: ScopeRequest) -> dict[str, object]:
